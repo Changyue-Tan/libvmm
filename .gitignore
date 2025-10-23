@@ -11,3 +11,5 @@ rust/target/
 .cache
 compile_commands.json
 *.orig
+
+microkit-sdk-2.0.1

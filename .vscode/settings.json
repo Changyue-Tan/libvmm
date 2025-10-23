@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "microkit.h": "c",
+        "stddef.h": "c",
+        "guest.h": "c",
+        "fault.h": "c"
+    }
+}
