@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 const std = @import("std");
 const LazyPath = std.Build.LazyPath;
+const Step = std.Build.Step;
 
 const MicrokitBoard = enum {
     qemu_virt_aarch64,
-    odroidc4,
     maaxboard,
 };
 
@@ -20,16 +20,6 @@ const targets = [_]Target {
         .zig_target = std.Target.Query{
             .cpu_arch = .aarch64,
             .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.cortex_a53 },
-            .cpu_features_add = std.Target.aarch64.featureSet(&[_]std.Target.aarch64.Feature{ .strict_align }),
-            .os_tag = .freestanding,
-            .abi = .none,
-        },
-    },
-    .{
-        .board = MicrokitBoard.odroidc4,
-        .zig_target = std.Target.Query{
-            .cpu_arch = .aarch64,
-            .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.cortex_a55 },
             .cpu_features_add = std.Target.aarch64.featureSet(&[_]std.Target.aarch64.Feature{ .strict_align }),
             .os_tag = .freestanding,
             .abi = .none,
@@ -64,8 +54,27 @@ const ConfigOptions = enum {
     benchmark
 };
 
+fn updateSectionObjcopy(b: *std.Build, section: []const u8, data_output: std.Build.LazyPath, data: []const u8, elf: []const u8) *std.Build.Step.Run {
+    const run_objcopy = b.addSystemCommand(&[_][]const u8{
+        "llvm-objcopy",
+    });
+    run_objcopy.addArg("--update-section");
+    const data_full_path = data_output.join(b.allocator, data) catch @panic("OOM");
+    run_objcopy.addPrefixedFileArg(b.fmt("{s}=", .{ section }), data_full_path);
+    run_objcopy.addFileArg(.{ .cwd_relative = b.getInstallPath(.bin, elf) });
+
+    // We need the ELFs we talk about to be in the install directory first.
+    run_objcopy.step.dependOn(b.getInstallStep());
+
+    return run_objcopy;
+}
+
 pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
+
+    const default_python = if (std.posix.getenv("PYTHON")) |p| p else "python3";
+    const python = b.option([]const u8, "python", "Path to Python to use") orelse default_python;
+
     const microkit_sdk = b.option(LazyPath, "sdk", "Path to Microkit SDK") orelse {
         std.log.err("Missing -Dsdk=/path/to/sdk argument", .{});
         return error.MissingMicrokitSdk;
@@ -92,7 +101,7 @@ pub fn build(b: *std.Build) !void {
     const libmicrokit_linker_script = microkit_board_dir.path(b, "lib/microkit.ld");
 
     const arm_vgic_version: usize = switch (microkit_board_option) {
-        .qemu_virt_aarch64, .odroidc4 => 2,
+        .qemu_virt_aarch64 => 2,
         .maaxboard => 3,
     };
 
@@ -104,8 +113,14 @@ pub fn build(b: *std.Build) !void {
     });
     const libvmm = libvmm_dep.artifact("vmm");
 
-    const exe = b.addExecutable(.{
-        .name = "vmm.elf",
+    const sddf_dep = b.dependency("sddf", .{
+        .target = target,
+        .optimize = optimize,
+        .microkit_board_dir = microkit_board_dir,
+    });
+
+    const client_vmm = b.addExecutable(.{
+        .name = "client_vmm.elf",
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -116,8 +131,8 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    const base_dts_path = b.fmt("board/{s}/linux.dts", .{ microkit_board });
-    const overlay = b.fmt("board/{s}/overlay.dts", .{ microkit_board });
+    const base_dts_path = "client_vm/linux.dts";
+    const overlay = if (arm_vgic_version == 3) "client_vm/gic_v3_overlay.dts" else "client_vm/gic_v2_overlay.dts";
     const dts_cat_cmd = b.addSystemCommand(&[_][]const u8{
         "sh", "../../tools/dtscat", base_dts_path, overlay
     });
@@ -125,27 +140,22 @@ pub fn build(b: *std.Build) !void {
     dts_cat_cmd.addFileInput(b.path(overlay));
     const final_dts = dts_cat_cmd.captureStdOut();
 
-    // For actually compiling the DTS into a DTB
-    const dtc_cmd = b.addSystemCommand(&[_][]const u8{
+    // For actually compiling the guest's DTS into a DTB
+    const guest_dtc_cmd = b.addSystemCommand(&.{
         "dtc", "-q", "-I", "dts", "-O", "dtb"
     });
-    dtc_cmd.addFileArg(.{ .cwd_relative = b.getInstallPath(.prefix, "final.dts") });
-    dtc_cmd.step.dependOn(&b.addInstallFileWithDir(final_dts, .prefix, "final.dts").step);
-    const dtb = dtc_cmd.captureStdOut();
+    guest_dtc_cmd.addFileArg(.{ .cwd_relative = b.getInstallPath(.prefix, "vm.dts") });
+    guest_dtc_cmd.step.dependOn(&b.addInstallFileWithDir(final_dts, .prefix, "vm.dts").step);
+    const guest_dtb = guest_dtc_cmd.captureStdOut();
 
-    // Add microkit.h to be used by the API wrapper.
-    exe.addIncludePath(libmicrokit_include);
-    // Add the static library that provides each protection domain's entry
-    // point (`main()`), which runs the main handler loop.
-    exe.addObjectFile(libmicrokit);
-    // Specify the linker script, this is necessary to set the ELF entry point address.
-    exe.setLinkerScript(libmicrokit_linker_script);
+    client_vmm.addIncludePath(libmicrokit_include);
+    client_vmm.addObjectFile(libmicrokit);
+    client_vmm.setLinkerScript(libmicrokit_linker_script);
+    client_vmm.linkLibrary(libvmm);
+    client_vmm.linkLibrary(sddf_dep.artifact("util"));
 
-    // Link the libvmm library, this will automatically add the libvmm headers as well.
-    exe.linkLibrary(libvmm);
-
-    exe.addCSourceFiles(.{
-        .files = &.{"vmm.c"},
+    client_vmm.addCSourceFiles(.{
+        .files = &.{"client_vmm.c"},
         .flags = &.{
             "-Wall",
             "-Werror",
@@ -163,10 +173,10 @@ pub fn build(b: *std.Build) !void {
         }),
     });
     // We need to produce the DTB from the DTS before doing anything to produce guest_images
-    guest_images.step.dependOn(&b.addInstallFileWithDir(dtb, .prefix, "linux.dtb").step);
+    guest_images.step.dependOn(&b.addInstallFileWithDir(guest_dtb, .prefix, "linux.dtb").step);
 
     const linux_image_dep = b.lazyDependency("linux", .{});
-    const initrd_image_dep = b.lazyDependency(b.fmt("{s}_initrd", .{ microkit_board }), .{});
+    const initrd_image_dep = b.lazyDependency("initrd", .{});
 
     if (custom_linux) |c| {
         guest_images.step.dependOn(&b.addInstallFileWithDir(.{ .cwd_relative = c }, .prefix, "linux").step);
@@ -174,11 +184,60 @@ pub fn build(b: *std.Build) !void {
         guest_images.step.dependOn(&b.addInstallFileWithDir(linux_image.path("linux"), .prefix, "linux").step);
     }
 
-    if (custom_initrd) |c| {
-        guest_images.step.dependOn(&b.addInstallFileWithDir(.{ .cwd_relative = c }, .prefix, "rootfs.cpio.gz").step);
-    } else if (initrd_image_dep) |initrd_image| {
-        guest_images.step.dependOn(&b.addInstallFileWithDir(initrd_image.path("rootfs.cpio.gz"), .prefix, "rootfs.cpio.gz").step);
+    // This is a bit weird but since we are making use of lazy dependencies when Zig evaluates
+    // build.zig to check for lazy dependencies it means that we could have a null initrd.
+    const initrd: ?LazyPath = blk: {
+        if (custom_initrd) |p| {
+            break :blk b.path(p);
+        } else if (initrd_image_dep) |p| {
+            break :blk p.path("rootfs.cpio.gz");
+        } else {
+            break :blk null;
+        }
+    };
+
+    // This steps adds any extra scripts we need as part of the initrd that are not
+    // already packaged into the CPIO archive.
+    if (initrd != null) {
+        const packrootfs_cmd = b.addSystemCommand(&.{
+            "bash"
+        });
+        const init_scripts = .{
+            libvmm_dep.path("tools/linux/blk/blk_client_init"),
+            libvmm_dep.path("tools/linux/net/net_client_init"),
+        };
+        const home_scripts = .{
+            libvmm_dep.path("tools/linux/blk/blk_integration_tests.sh"),
+            libvmm_dep.path("tools/linux/blk/blk_bench.sh"),
+        };
+        const packrootfs = libvmm_dep.path("tools/packrootfs");
+        packrootfs_cmd.addFileArg(packrootfs);
+        packrootfs_cmd.addFileInput(packrootfs);
+        packrootfs_cmd.addFileArg(initrd.?);
+        _ = packrootfs_cmd.addOutputDirectoryArg("rootfs_staging");
+        packrootfs_cmd.addArg("-o");
+        const packed_rootfs = packrootfs_cmd.addOutputFileArg("rootfs.cpio.gz");
+        packrootfs_cmd.addArg("--startup");
+        inline for (init_scripts) |s| {
+            packrootfs_cmd.addFileInput(s);
+            packrootfs_cmd.addFileArg(s);
+        }
+        packrootfs_cmd.addArg("--home");
+        inline for (home_scripts) |s| {
+            packrootfs_cmd.addFileInput(s);
+            packrootfs_cmd.addFileArg(s);
+        }
+        guest_images.step.dependOn(&b.addInstallFileWithDir(packed_rootfs, .prefix, "rootfs.cpio.gz").step);
     }
+
+    // Hack to avoid caching of the guest images incbins: https://github.com/ziglang/zig/issues/16919
+    var prng = std.Random.DefaultPrng.init(blk: {
+        var seed: u64 = undefined;
+        try std.posix.getrandom(std.mem.asBytes(&seed));
+        break :blk seed;
+    });
+    const rand = prng.random();
+    const random_arg = b.fmt("-DRANDOM=\"{}\"", .{ rand.int(usize) });
 
     const kernel_image_arg = b.fmt("-DGUEST_KERNEL_IMAGE_PATH=\"{s}\"", .{ b.getInstallPath(.prefix, "linux") });
     const initrd_image_arg = b.fmt("-DGUEST_INITRD_IMAGE_PATH=\"{s}\"", .{ b.getInstallPath(.prefix, "rootfs.cpio.gz") });
@@ -189,46 +248,200 @@ pub fn build(b: *std.Build) !void {
             kernel_image_arg,
             dtb_image_arg,
             initrd_image_arg,
+            random_arg,
             "-x",
             "assembler-with-cpp",
         }
     });
 
-    exe.addObject(guest_images);
-    b.installArtifact(exe);
+    client_vmm.addObject(guest_images);
+    b.installArtifact(client_vmm);
 
-    const system_description_path = b.fmt("board/{s}/simple.system", .{ microkit_board });
+    const timer_driver_class = switch (microkit_board_option) {
+        .maaxboard => "imx",
+        else => null,
+    };
+    var timer_driver_install: ?*Step.InstallArtifact = null;
+    if (timer_driver_class) |c| {
+        const driver = sddf_dep.artifact(b.fmt("driver_timer_{s}.elf", .{ c }));
+        // To match what our SDF expects
+        timer_driver_install = b.addInstallArtifact(driver, .{ .dest_sub_path = "timer_driver.elf" });
+    }
+
+    const blk_driver_class = switch (microkit_board_option) {
+        .qemu_virt_aarch64 => "virtio",
+        .maaxboard => "mmc_imx",
+    };
+
+    const serial_driver_class = switch (microkit_board_option) {
+        .qemu_virt_aarch64 => "arm",
+        .maaxboard => "imx",
+    };
+
+    const eth_driver_class = switch (microkit_board_option) {
+        .qemu_virt_aarch64 => "virtio",
+        .maaxboard => "imx",
+    };
+
+    const blk_driver = sddf_dep.artifact(b.fmt("driver_blk_{s}.elf", .{ blk_driver_class }));
+    const serial_driver = sddf_dep.artifact(b.fmt("driver_serial_{s}.elf", .{ serial_driver_class }));
+    const eth_driver = sddf_dep.artifact(b.fmt("driver_net_{s}.elf", .{ eth_driver_class }));
+
+    b.installArtifact(blk_driver);
+    b.installArtifact(sddf_dep.artifact("blk_virt.elf"));
+    b.installArtifact(sddf_dep.artifact("serial_virt_rx.elf"));
+    b.installArtifact(sddf_dep.artifact("serial_virt_tx.elf"));
+    const net_virt_rx = sddf_dep.artifact("net_virt_rx.elf");
+    const net_virt_tx = sddf_dep.artifact("net_virt_tx.elf");
+    const net_copy = sddf_dep.artifact("net_copy.elf");
+    // Because our SDF expects a different ELF name for these articats, we have some extra steps.
+    const blk_driver_install = b.addInstallArtifact(blk_driver, .{ .dest_sub_path = "blk_driver.elf" });
+    const serial_driver_install = b.addInstallArtifact(serial_driver, .{ .dest_sub_path = "serial_driver.elf" });
+    const eth_driver_install = b.addInstallArtifact(eth_driver, .{ .dest_sub_path = "eth_driver.elf" });
+
+    const net_virt_rx_install = b.addInstallArtifact(net_virt_rx, .{ .dest_sub_path = "network_virt_rx.elf" });
+    const net_virt_tx_install = b.addInstallArtifact(net_virt_tx, .{ .dest_sub_path = "network_virt_tx.elf" });
+    const net_copy_install = b.addInstallArtifact(net_copy, .{ .dest_sub_path = "network_copy.elf" });
+
+    // For compiling the metaprogram needed DTS into a DTB
+    const dts = sddf_dep.path(b.fmt("dts/{s}.dts", .{ microkit_board }));
+    const dtc_cmd = b.addSystemCommand(&[_][]const u8{
+        "dtc", "-q", "-I", "dts", "-O", "dtb"
+    });
+    dtc_cmd.addFileInput(dts);
+    dtc_cmd.addFileArg(dts);
+    const dtb = dtc_cmd.captureStdOut();
+
+    // Run the metaprogram to get sDDF configuration binary files and the SDF file.
+    const metaprogram = b.path("meta.py");
+    const run_metaprogram = b.addSystemCommand(&[_][]const u8{
+        python,
+    });
+    run_metaprogram.addFileArg(metaprogram);
+    run_metaprogram.addFileInput(metaprogram);
+    run_metaprogram.addPrefixedDirectoryArg("--sddf=", sddf_dep.path(""));
+    run_metaprogram.addPrefixedDirectoryArg("--dtb=", dtb);
+    run_metaprogram.addPrefixedDirectoryArg("--client-dtb=", guest_dtb);
+    const meta_output = run_metaprogram.addPrefixedOutputDirectoryArg("--output=", "meta_output");
+    run_metaprogram.addArg("--board");
+    run_metaprogram.addArg(microkit_board);
+    run_metaprogram.addArg("--sdf");
+    run_metaprogram.addArg("virtio.system");
+
+    const meta_output_install = b.addInstallDirectory(.{
+        .source_dir = meta_output,
+        .install_dir = .prefix,
+        .install_subdir = "meta_output",
+    });
+
+    // Build up objcopys
+    var objcopys = std.array_list.Managed(*Step.Run).init(b.allocator);
+    // Block
+    {
+        const virt_objcopy = updateSectionObjcopy(b, ".blk_virt_config", meta_output, "blk_virt.data", "blk_virt.elf");
+        const driver_resources_objcopy = updateSectionObjcopy(b, ".device_resources", meta_output, "blk_driver_device_resources.data", "blk_driver.elf");
+        const driver_config_objcopy = updateSectionObjcopy(b, ".blk_driver_config", meta_output, "blk_driver.data", "blk_driver.elf");
+        driver_resources_objcopy.step.dependOn(&blk_driver_install.step);
+        driver_config_objcopy.step.dependOn(&blk_driver_install.step);
+
+        try objcopys.append(virt_objcopy);
+        try objcopys.append(driver_resources_objcopy);
+        try objcopys.append(driver_config_objcopy);
+
+        const client_objcopy = updateSectionObjcopy(b, ".blk_client_config", meta_output, "blk_client_CLIENT_VMM.data", client_vmm.name);
+        client_objcopy.step.dependOn(&client_vmm.step);
+        try objcopys.append(client_objcopy);
+    }
+    // Serial
+    {
+        const driver_resources_objcopy = updateSectionObjcopy(b, ".device_resources", meta_output, "serial_driver_device_resources.data", "serial_driver.elf");
+        driver_resources_objcopy.step.dependOn(&serial_driver_install.step);
+        const driver_config_objcopy = updateSectionObjcopy(b, ".serial_driver_config", meta_output, "serial_driver_config.data", "serial_driver.elf");
+        driver_config_objcopy.step.dependOn(&serial_driver_install.step);
+        const virt_rx_objcopy = updateSectionObjcopy(b, ".serial_virt_rx_config", meta_output, "serial_virt_rx.data", "serial_virt_rx.elf");
+        const virt_tx_objcopy = updateSectionObjcopy(b, ".serial_virt_tx_config", meta_output, "serial_virt_tx.data", "serial_virt_tx.elf");
+
+        try objcopys.append(virt_rx_objcopy);
+        try objcopys.append(virt_tx_objcopy);
+        try objcopys.append(driver_resources_objcopy);
+        try objcopys.append(driver_config_objcopy);
+
+        const client_objcopy = updateSectionObjcopy(b, ".serial_client_config", meta_output, "serial_client_CLIENT_VMM.data", client_vmm.name);
+        client_objcopy.step.dependOn(&client_vmm.step);
+        try objcopys.append(client_objcopy);
+    }
+    // Network
+    {
+        const driver_resources_objcopy = updateSectionObjcopy(b, ".device_resources", meta_output, "eth_driver_device_resources.data", "eth_driver.elf");
+        driver_resources_objcopy.step.dependOn(&eth_driver_install.step);
+        const driver_config_objcopy = updateSectionObjcopy(b, ".net_driver_config", meta_output, "net_driver.data", "eth_driver.elf");
+        driver_config_objcopy.step.dependOn(&eth_driver_install.step);
+        const virt_rx_objcopy = updateSectionObjcopy(b, ".net_virt_rx_config", meta_output, "net_virt_rx.data", "network_virt_rx.elf");
+        virt_rx_objcopy.step.dependOn(&net_virt_rx_install.step);
+        const virt_tx_objcopy = updateSectionObjcopy(b, ".net_virt_tx_config", meta_output, "net_virt_tx.data", "network_virt_tx.elf");
+        virt_tx_objcopy.step.dependOn(&net_virt_tx_install.step);
+        const copy_rx_objcopy = updateSectionObjcopy(b, ".net_copy_config", meta_output, "net_copy_client0_net_copier.data", "network_copy.elf");
+        copy_rx_objcopy.step.dependOn(&net_copy_install.step);
+
+        try objcopys.append(copy_rx_objcopy);
+        try objcopys.append(virt_rx_objcopy);
+        try objcopys.append(virt_tx_objcopy);
+        try objcopys.append(driver_resources_objcopy);
+        try objcopys.append(driver_config_objcopy);
+
+        const client_objcopy = updateSectionObjcopy(b, ".net_client_config", meta_output, "net_client_CLIENT_VMM.data", client_vmm.name);
+        client_objcopy.step.dependOn(&client_vmm.step);
+        try objcopys.append(client_objcopy);
+    }
+    // Timer
+    {
+        if (timer_driver_install != null) {
+            const blk_driver_timer_objcopy = updateSectionObjcopy(b, ".timer_client_config", meta_output, "timer_client_blk_driver.data", "blk_driver.elf");
+            blk_driver_timer_objcopy.step.dependOn(&blk_driver_install.step);
+            const timer_driver_objcopy = updateSectionObjcopy(b, ".device_resources", meta_output, "timer_driver_device_resources.data", "timer_driver.elf");
+            timer_driver_objcopy.step.dependOn(&timer_driver_install.?.step);
+
+            try objcopys.append(blk_driver_timer_objcopy);
+            try objcopys.append(timer_driver_objcopy);
+        }
+    }
+    // VMM
+    {
+        const vmm_objcopy = updateSectionObjcopy(b, ".vmm_config", meta_output, "vmm_CLIENT_VMM.data", "client_vmm.elf");
+        try objcopys.append(vmm_objcopy);
+    }
+
     const final_image_dest = b.getInstallPath(.bin, "./loader.img");
-    const microkit_tool_cmd = std.Build.Step.Run.create(b, "run microkit tool");
+    const microkit_tool_cmd = Step.Run.create(b, "run microkit tool");
     microkit_tool_cmd.addFileArg(microkit_tool);
     microkit_tool_cmd.addArgs(&[_][]const u8{
-       system_description_path,
-       "--search-path",
-       b.getInstallPath(.bin, ""),
-       "--board",
-       microkit_board,
-       "--config",
-       microkit_config,
-       "-o",
-       final_image_dest,
-       "-r",
-       b.getInstallPath(.prefix, "./report.txt")
+        b.getInstallPath(.{ .custom = "meta_output" }, "virtio.system"),
+        "--search-path", b.getInstallPath(.bin, ""),
+        "--board", microkit_board,
+        "--config", microkit_config,
+        "-o", final_image_dest,
+        "-r", b.getInstallPath(.prefix, "./report.txt")
     });
+    for (objcopys.items) |objcopy| {
+        microkit_tool_cmd.step.dependOn(&objcopy.step);
+    }
+    microkit_tool_cmd.step.dependOn(&meta_output_install.step);
     microkit_tool_cmd.step.dependOn(b.getInstallStep());
     microkit_tool_cmd.setEnvironmentVariable("MICROKIT_SDK", microkit_sdk.getPath3(b, null).toString(b.allocator) catch @panic("OOM"));
-    // Add the "microkit" step, and make it the default step when we execute `zig build`
+    // Add the "microkit" step, and make it the default step when we execute `zig build`>
     const microkit_step = b.step("microkit", "Compile and build the final bootable image");
     microkit_step.dependOn(&microkit_tool_cmd.step);
     b.default_step = microkit_step;
 
     // This is setting up a `qemu` command for running the system using QEMU,
     // which we only want to do when we have a board that we can actually simulate.
-    const loader_arg = b.fmt("loader,file={s},addr=0x70000000,cpu-num=0", .{ final_image_dest });
+    var qemu_cmd: ?*Step.Run = null;
     if (microkit_board_option == .qemu_virt_aarch64) {
-        const qemu_cmd = b.addSystemCommand(&[_][]const u8{
+        const loader_arg = b.fmt("loader,file={s},addr=0x70000000,cpu-num=0", .{final_image_dest});
+        qemu_cmd = b.addSystemCommand(&[_][]const u8{
             "qemu-system-aarch64",
             "-machine",
-            "virt,virtualization=on,highmem=off,secure=off",
+            "virt,virtualization=on",
             "-cpu",
             "cortex-a53",
             "-serial",
@@ -239,8 +452,38 @@ pub fn build(b: *std.Build) !void {
             "2G",
             "-nographic",
         });
-        qemu_cmd.step.dependOn(b.default_step);
+    }
+
+    if (qemu_cmd) |cmd| {
+        const create_disk_cmd = b.addSystemCommand(&[_][]const u8{
+            "bash",
+        });
+        const mkvirtdisk = sddf_dep.path("tools/mkvirtdisk");
+        create_disk_cmd.addFileArg(mkvirtdisk);
+        create_disk_cmd.addFileInput(mkvirtdisk);
+        const disk = create_disk_cmd.addOutputFileArg("disk");
+        create_disk_cmd.addArgs(&[_][]const u8{
+            "1", "512", b.fmt("{}", .{ 1024 * 1024 * 16 }), "GPT",
+        });
+
+        // We want changes to the virtual disk to persist, so only install it if
+        // it doesn't already exist.
+        std.fs.cwd().access(b.getInstallPath(.prefix, "disk"), .{}) catch {
+            const disk_install = b.addInstallFile(disk, "disk");
+            disk_install.step.dependOn(&create_disk_cmd.step);
+            cmd.step.dependOn(&disk_install.step);
+        };
+
+        cmd.addArgs(&.{
+            "-global", "virtio-mmio.force-legacy=false",
+            "-drive", b.fmt("file={s},format=raw,if=none,id=drive0", .{ b.getInstallPath(.prefix, "disk") }),
+            "-device", "virtio-blk-device,drive=drive0,id=virtblk0,num-queues=1",
+            "-device", "virtio-net-device,netdev=netdev0",
+            "-netdev", "user,id=netdev0,hostfwd=tcp::1236-:1236,hostfwd=tcp::1237-:1237,hostfwd=udp::1235-:1235",
+        });
+
+        cmd.step.dependOn(b.default_step);
         const simulate_step = b.step("qemu", "Simulate the image using QEMU");
-        simulate_step.dependOn(&qemu_cmd.step);
+        simulate_step.dependOn(&cmd.step);
     }
 }

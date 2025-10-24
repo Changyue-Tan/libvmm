@@ -1,29 +1,22 @@
 .{
-    .name = .simple,
+    .name = .virtio,
     .version = "0.0.0",
 
     .dependencies = .{
         .libvmm = .{
             .path = "../../"
         },
+        .sddf = .{
+            .path = "../../dep/sddf",
+        },
         .linux = .{
-            .url = "https://trustworthy.systems/Downloads/libvmm/images/85000f3f42a882e4476e57003d53f2bbec8262b0-linux.tar.gz",
-            .hash = "linux-0.0.0-AAAAAACKHwKLhs9sy_2Ma-_f1lh-vvTVxNfPElIDod2h",
+            .url = "https://trustworthy.systems/Downloads/libvmm/images/a3f4bf9e2eb24fa8fc0d3d8cd02e4d8097062e8b-linux.tar.gz",
+            .hash = "linux-0.0.0-AAAAAAAy6QB75KyvszBUqWRkeJoqU0ExTN2WZsVCJ25X",
             .lazy = true
         },
-        .qemu_virt_aarch64_initrd = .{
-            .url = "https://trustworthy.systems/Downloads/libvmm/images/6dcd1debf64e6d69b178cd0f46b8c4ae7cebe2a5-rootfs.cpio.gz.tar.gz",
-            .hash = "rootfs_cpio_gz-0.0.0-AAAAAFuyCwDpUITQ72Vk5neE9sZHvBPQTXdJFAvR05wM",
-            .lazy = true
-        },
-        .odroidc4_initrd = .{
-            .url = "https://trustworthy.systems/Downloads/libvmm/images/ec78fdfd660bc9358e4d7dcb73b55d88339ba19d-rootfs.cpio.gz.tar.gz",
-            .hash = "rootfs_cpio_gz-0.0.0-AAAAAIteFwDCe2qFpuICyNBmCl0bQcKNNMxKXFRIus2P",
-            .lazy = true
-        },
-        .maaxboard_initrd = .{
-            .url = "https://trustworthy.systems/Downloads/libvmm/images/ce255a92feb25d09b5a0336b798523f35c2f8fe0-rootfs.cpio.gz.tar.gz",
-            .hash = "rootfs_cpio_gz-0.0.0-AAAAAOBNFwDKwj6sAPDBtdu7X77Jg5Nl3lj_wRViitVr",
+        .initrd = .{
+            .url = "https://trustworthy.systems/Downloads/libvmm/images/b6a276df6a0e39f76bc8950e975daa2888ad83df-rootfs.cpio.gz.tar.gz",
+            .hash = "rootfs_cpio_gz-0.0.0-AAAAAJ3gFwAzvjtmYwUEeK3b6Bp9xUjawwaJxoOvPF9u",
             .lazy = true
         },
     },
@@ -31,5 +24,5 @@
         "build.zig",
         "build.zig.zon",
     },
-    .fingerprint = 0xc17b3d0243e9416e,
+    .fingerprint = 0x3675eff43d65355,
 }

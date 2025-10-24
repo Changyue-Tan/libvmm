@@ -3,6 +3,11 @@
         "microkit.h": "c",
         "stddef.h": "c",
         "guest.h": "c",
-        "fault.h": "c"
+        "fault.h": "c",
+        "time.h": "c",
+        "_time.h": "c",
+        "util.h": "c",
+        "linux.h": "c",
+        "sel4bench.h": "c"
     }
 }
