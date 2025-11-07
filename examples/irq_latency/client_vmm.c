@@ -56,6 +56,14 @@ net_queue_handle_t net_rx_queue;
 net_queue_handle_t net_tx_queue;
 static struct virtio_net_device virtio_net;
 
+#define BUSY_WAIT_CYCLE 1e2
+
+static inline uint64_t read_cycle_counter(void) {
+    uint64_t val;
+    asm volatile("mrs %0, PMCCNTR_EL0" : "=r"(val));
+    return val;
+}
+
 void init(void)
 {
     assert(serial_config_check_magic(&serial_config));
@@ -167,10 +175,18 @@ void init(void)
     /// NOTE: This is for printing in benchmark mode, LOG_VMM only work in debug mode
     serial_putchar_init(serial_config.tx.id, &serial_tx_queue);
     sddf_printf("hello\n");
+
+    uint64_t start = read_cycle_counter();
+    for (volatile int i = 0; i < BUSY_WAIT_CYCLE; i++);
+    uint64_t end = read_cycle_counter();
+
+    sddf_printf("Start: %lu\n", start);
+    sddf_printf("End: %lu\n", end);
+    sddf_printf("Elapsed cycles: %lu\n", end - start);
 }
 
 void notified(microkit_channel ch)
-{
+{   
     if (ch == serial_config.rx.id) {
         virtio_console_handle_rx(&virtio_console);
     } else if (ch == serial_config.tx.id || ch == net_config.tx.id) {
@@ -182,12 +198,16 @@ void notified(microkit_channel ch)
     } else {
         LOG_VMM_ERR("Unexpected channel, ch: 0x%lx\n", ch);
     }
+    // sddf_printf("Notified at: %lu\n", read_cycle_counter());
+    sddf_printf("[ client_vmm:notified() ] Notified!\n");
 }
 
 seL4_Bool fault(microkit_child child, microkit_msginfo msginfo, microkit_msginfo *reply_msginfo)
-{
+{   
     bool success = fault_handle(child, msginfo);
     if (success) {
+        // sddf_printf("Fault handle succeed at: %lu\n", read_cycle_counter());
+        // sddf_printf("[ client_vmm:fault() ] Fault handle succeed!\n");
         /* Now that we have handled the fault successfully, we reply to it so
          * that the guest can resume execution. */
         *reply_msginfo = microkit_msginfo_new(0, 0);

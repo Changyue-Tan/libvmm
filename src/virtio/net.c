@@ -13,6 +13,8 @@
 #include <libvmm/virtio/net.h>
 #include <sddf/network/queue.h>
 
+#include <sddf/util/printf.h>
+
 /* Uncomment this to enable debug logging */
 // #define DEBUG_NET
 
@@ -357,6 +359,7 @@ bool virtio_net_handle_rx(struct virtio_net_device *state)
     }
 
     if (respond_to_guest) {
+        // sddf_printf("respond_to_guest from net.c!\n");
         return virtio_net_respond(dev);
     }
 

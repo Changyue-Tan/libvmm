@@ -1,1 +1,1 @@
-make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=../../microkit-sdk-2.0.1 qemu
+make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=../../microkit-sdk-2.0.1 MICROKIT_CONFIG=benchmark qemu

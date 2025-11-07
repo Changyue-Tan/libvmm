@@ -18,6 +18,14 @@
 #include <sddf/util/fsmalloc.h>
 #include <sddf/util/ialloc.h>
 
+#include <sddf/util/printf.h>
+
+// uint64_t read_cycle_counter(void) {
+//     uint64_t val;
+//     asm volatile("mrs %0, PMCCNTR_EL0" : "=r"(val));
+//     return val;
+// }
+
 #define SECTORS_IN_TRANSFER_WINDOW (BLK_TRANSFER_SIZE / VIRTIO_BLK_SECTOR_SIZE)
 
 /* Uncomment this to enable debug logging */
@@ -577,7 +585,10 @@ static bool virtio_blk_mmio_queue_notify(struct virtio_device *dev)
 
 bool virtio_blk_handle_resp(struct virtio_blk_device *state)
 {
-    LOG_BLOCK(" ----------- Blk virt notified VMM ----------- \n");
+    // LOG_BLOCK(" ----------- Blk virt notified VMM ----------- \n");
+
+    // sddf_printf("Blk virt notified VMM\n");
+    // sddf_printf("now: %llu\n", read_cycle_counter);
 
     int err = 0;
     struct virtio_device *dev = &state->virtio_device;
@@ -801,10 +812,14 @@ bool virtio_blk_handle_resp(struct virtio_blk_device *state)
 
     if (virt_notify) {
         LOG_BLOCK("virtio_blk_handle_resp virt notify\n");
+
+        // sddf_printf("now: %llu\n", read_cycle_counter);
+
         microkit_notify(state->server_ch);
     }
 
-    return virq_inject_success;
+    // sddf_printf("now: %llu\n", read_cycle_counter);
+    // return virq_inject_success;
 }
 
 static inline void virtio_blk_config_init(struct virtio_blk_device *blk_dev)
