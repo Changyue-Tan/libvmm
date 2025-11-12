@@ -131,11 +131,11 @@ $(IMAGE_FILE) $(REPORT_FILE): $(IMAGES) $(SYSTEM_FILE)
 vm_dir:
 	mkdir -p client_vm
 
-${LINUX}:
-	curl -L ${LIBVMM_DOWNLOADS}/$(LINUX).tar.gz -o $(LINUX).tar.gz
-	mkdir -p linux_download_dir
-	tar -xf $@.tar.gz -C linux_download_dir
-	cp linux_download_dir/${LINUX}/linux ${LINUX}
+# ${LINUX}:
+# 	curl -L ${LIBVMM_DOWNLOADS}/$(LINUX).tar.gz -o $(LINUX).tar.gz
+# 	mkdir -p linux_download_dir
+# 	tar -xf $@.tar.gz -C linux_download_dir
+# 	cp linux_download_dir/${LINUX}/linux ${LINUX}
 
 # This downloads a bunch of stuff includes the shell for the kernel to run after boot
 # This is called init ram disk
@@ -154,7 +154,8 @@ client_vm/rootfs.cpio.gz: ${INITRD} \
 		--home $(CLIENT_VM_USERLEVEL_HOME)
 
 blk_storage:
-	$(LIBVMM_TOOLS)/mkvirtdisk $@ $(BLK_NUM_PART) $(BLK_SIZE) $(BLK_MEM)
+# 	$(LIBVMM_TOOLS)/mkvirtdisk $@ $(BLK_NUM_PART) $(BLK_SIZE) $(BLK_MEM)
+	$(SDDF)/tools/mkvirtdisk $@ $(BLK_NUM_PART) $(BLK_SIZE) $(BLK_MEM) GPT
 
 client_vm/vm.dts: $(CLIENT_VM)/linux.dts $(CLIENT_VM)/$(GIC_DT_OVERLAY) \
 	$(CHECK_FLAGS_BOARD_MD5) |vm_dir

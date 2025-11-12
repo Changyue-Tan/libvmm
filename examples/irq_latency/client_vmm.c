@@ -1,3 +1,19 @@
+// LOG: week 9 wednesady
+// Ivan help me hacked into linux kernel to comment out the code the disable el0 level access to pmu counters
+// which was the cause of the crash of vmm, reason for hault of linux booting, when trying to 
+// access the PMU counter after linux stats booting
+// because vmm is doing illegal instruction, and in benchmark mode
+// self4 do not tell you what crashed who
+// the hacked custom linux image is in example/irq-latnecy
+
+/// TODO: create uio program to ack the injected interrupt
+// look at timer exmaple in sddf to make timer interrupt vmm
+// print the time of vmm rececing timer interrupt, should be in notified()
+// print the time of vmm injecting interrupt 
+// register for virq_ack in init
+// respond to vmm from uio program
+// print the timer of vmm receviing ack from guest, should be in fault() eg. vgic_handle_fault_maintenance
+
 /*
  * Copyright 2025, UNSW
  *
@@ -23,6 +39,8 @@
 #include <sddf/network/queue.h>
 #include <sddf/network/config.h>
 #include <sddf/util/printf.h>
+
+#include <sddf/benchmark/sel4bench.h> // for sel4bench_init() and SEL4BENCH_READ_CCNT
 
 __attribute__((__section__(".serial_client_config"))) serial_client_config_t serial_config;
 __attribute__((__section__(".blk_client_config"))) blk_client_config_t blk_config;
@@ -55,14 +73,6 @@ static struct virtio_blk_device virtio_blk;
 net_queue_handle_t net_rx_queue;
 net_queue_handle_t net_tx_queue;
 static struct virtio_net_device virtio_net;
-
-#define BUSY_WAIT_CYCLE 1e2
-
-static inline uint64_t read_cycle_counter(void) {
-    uint64_t val;
-    asm volatile("mrs %0, PMCCNTR_EL0" : "=r"(val));
-    return val;
-}
 
 void init(void)
 {
@@ -175,14 +185,11 @@ void init(void)
     /// NOTE: This is for printing in benchmark mode, LOG_VMM only work in debug mode
     serial_putchar_init(serial_config.tx.id, &serial_tx_queue);
     sddf_printf("hello\n");
-
-    uint64_t start = read_cycle_counter();
-    for (volatile int i = 0; i < BUSY_WAIT_CYCLE; i++);
-    uint64_t end = read_cycle_counter();
-
-    sddf_printf("Start: %lu\n", start);
-    sddf_printf("End: %lu\n", end);
-    sddf_printf("Elapsed cycles: %lu\n", end - start);
+    
+    sel4bench_init();
+    ccnt_t ccnt;
+    SEL4BENCH_READ_CCNT(ccnt);
+    sddf_printf("[ client_vmm.c: init() ] NOW: %lu\n", ccnt);
 }
 
 void notified(microkit_channel ch)
@@ -199,7 +206,10 @@ void notified(microkit_channel ch)
         LOG_VMM_ERR("Unexpected channel, ch: 0x%lx\n", ch);
     }
     // sddf_printf("Notified at: %lu\n", read_cycle_counter());
-    sddf_printf("[ client_vmm:notified() ] Notified!\n");
+    // sddf_printf("[ client_vmm:notified() ] Notified!\n");
+    ccnt_t ccnt;
+    SEL4BENCH_READ_CCNT(ccnt);
+    sddf_printf("[ client_vmm.c: notified() ] NOW: %lu\n", ccnt);
 }
 
 seL4_Bool fault(microkit_child child, microkit_msginfo msginfo, microkit_msginfo *reply_msginfo)
